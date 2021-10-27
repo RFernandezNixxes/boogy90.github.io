@@ -5,7 +5,7 @@ The asm has been extracted by using RenderDoc.
 
 The HLSL shader that we will be referencing is a basic pixel shader that outputs a single color from a constant buffer:
 
-```
+```hlsl
 cbuffer ColorConstantBuffer : register(b0)
 {
   float4 cColor;
@@ -88,6 +88,7 @@ Switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`:
   exp           mrt0, v0, v0, v1, v1 done compr vm      // 000000000018: F8001C0F 00000100
 ```
 
+Holy cow, did our shader just turn into 5 lines of assembly? What happened.
 
 
 ### The end
