@@ -20,7 +20,7 @@ float4 PSMain() : SV_TARGET0
 
 ### D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
 
-We start out with a root signature that has one entry for our pixel shader. A D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE with range type set to D3D12_DESCRIPTOR_RANGE_TYPE_CBV. Compiling the pixel shader together with the root signature gives us the following assembly:
+We start out with a root signature that has one entry for our pixel shader. A `D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE` with range type set to `D3D12_DESCRIPTOR_RANGE_TYPE_CBV`. Compiling the pixel shader together with the root signature gives us the following assembly:
 
 ```
   s_version     UC_VERSION_GFX10 | UC_VERSION_W64_BIT   // 000000000000: B0802004
@@ -44,8 +44,16 @@ I'll highlight the important bits that are relevant for our constant buffer load
   s_mov_b32       s0, s2                                  // 00000000000C: BE800302
   s_load_dwordx4  s[0:3], s[0:1], null                  // 000000000010: F4080000 FA000000
 ```
-The `s_getpc_b64` is a clever way of setting s1 to zero, it stores the byte address of the next instruction into s0 and s1. Essentially setting s0 to 00000000000C and s1 to 000000000000
+The `s_getpc_b64` is a clever way of setting s1 to zero, it stores the byte address of the next instruction into s0 and s1. Essentially setting s0 to 00000C and s1 to 000000.
+s0 is immediately overwritten with s2 by `s_mov_b32`. My assumption is that s2 contains the adress of the descriptor table that holds the constant buffer descriptor. Eventually `s_load_dwordx4` loads the constant buffer descriptor into s0 through s3.
 
+```
+  tbuffer_load_format_xyzw  v[0:3], v0, s[0:3], 0 idxen format:[BUF_FMT_32_32_32_32_FLOAT] // 000000000020: EA6B2000 80000000
+```
+
+With `tbuffer_load_format_xyzw` we load the `cColor` value into v0 through v3 using the constant buffer descriptor we loaded earlier.
+It's interesting that the compiler decides to use a `tbuffer_load_format_xyzw` instead of a `s_buffer_load_dwordx4` instruction even when the constant buffer value is wave invariant. My guess is that it's an optimization to load directly into vector registers to save a couple of scalar registers. Since it needs to output the color value to vector registers anyway.
+Bassically this is the assembly that you get when you use a D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE as root signature entry. Now lets see what happens if we change it to `D3D12_ROOT_PARAMETER_TYPE_CBV`.
 
 ### D3D12_ROOT_PARAMETER_TYPE_CBV
 
@@ -79,3 +87,9 @@ Switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`:
   v_cvt_pkrtz_f16_f32  v1, s4, s5                       // 000000000010: D52F0001 00000A04
   exp           mrt0, v0, v0, v1, v1 done compr vm      // 000000000018: F8001C0F 00000100
 ```
+
+
+
+### The end
+
+I hope this post gave a bit of insight on how different type of root signature parameters change the way a shader is compiled. 
