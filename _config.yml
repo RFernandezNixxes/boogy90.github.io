@@ -1,1 +1,7 @@
 theme: minima
+
+minima:
+  # generate social links in footer
+  social_links:
+    github:  Boogy90
+    linkedin: wesseldegroot
