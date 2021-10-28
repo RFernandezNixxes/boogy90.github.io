@@ -1,7 +1,7 @@
 ## Dissecting shader assembly with different d3d12 root signatures
 
 In this post I'd like to show how changing the root signature can impact the generated shader assembly. The assembly that we will be looking at is the assembly from RDNA2, specifically taken on a AMD RX6600 XT. The ISA documentation can be found [here](https://developer.amd.com/wp-content/resources/RDNA_Shader_ISA.pdf). We are going to assume that the reader has a basic understanding of D3D12 root signatures.
-The asm has been extracted by using RenderDoc.
+The assembly has been extracted by using RenderDoc.
 
 The HLSL shader that we will be referencing is a basic pixel shader that outputs a single color from a constant buffer:
 
@@ -42,22 +42,22 @@ I'll highlight the important bits that are relevant for our constant buffer load
 ```
   s_getpc_b64     s[0:1]                                  // 000000000008: BE801F80
   s_mov_b32       s0, s2                                  // 00000000000C: BE800302
-  s_load_dwordx4  s[0:3], s[0:1], null                  // 000000000010: F4080000 FA000000
+  s_load_dwordx4  s[0:3], s[0:1], null                    // 000000000010: F4080000 FA000000
 ```
 The `s_getpc_b64` is a clever way of setting s1 to zero, it stores the byte address of the next instruction into s0 and s1. Essentially setting s0 to 00000C and s1 to 000000.
-s0 is immediately overwritten with s2 by `s_mov_b32`. My assumption is that s2 contains the adress of the descriptor table that holds the constant buffer descriptor. Eventually `s_load_dwordx4` loads the constant buffer descriptor into s0 through s3.
+s0 is immediately overwritten with s2 by `s_mov_b32`. My assumption is that s2 contains the adress of the descriptor table that holds the constant buffer descriptor. Eventually `s_load_dwordx4` loads the constant buffer descriptor from the descriptor table defined in s[0:1] at index 0 into s0 through s3.
 
 ```
   tbuffer_load_format_xyzw  v[0:3], v0, s[0:3], 0 idxen format:[BUF_FMT_32_32_32_32_FLOAT] // 000000000020: EA6B2000 80000000
 ```
 
 With `tbuffer_load_format_xyzw` we load the `cColor` value into v0 through v3 using the constant buffer descriptor we loaded earlier.
-It's interesting that the compiler decides to use a `tbuffer_load_format_xyzw` instead of a `s_buffer_load_dwordx4` instruction even when the constant buffer value is wave invariant. My guess is that it's an optimization to load directly into vector registers to save a couple of scalar registers. Since it needs to output the color value to vector registers anyway.
-Bassically this is the assembly that you get when you use a D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE as root signature entry. Now lets see what happens if we change it to `D3D12_ROOT_PARAMETER_TYPE_CBV`.
+It's interesting to see that the compiler decides to use a `tbuffer_load_format_xyzw` instead of a `s_buffer_load_dwordx4` !check_this_plz! instruction even when the constant buffer value is uniform across the wave. My guess is that it's an optimization to load directly into vector registers to save a couple of scalar registers. The output needs to be written to a vector register anyway so it might as well do that here to save a couple of scalar registers.
+Bassically this is the assembly that you get when you use a D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE as a root signature entry. Now lets see what happens if we change it to `D3D12_ROOT_PARAMETER_TYPE_CBV`.
 
 ### D3D12_ROOT_PARAMETER_TYPE_CBV
 
-Switching to a `D3D12_ROOT_PARAMETER_TYPE_CBV` gets us:
+Again, we use the same shader but this time we use D3D12_ROOT_PARAMETER_TYPE_CBV instead as root signature entry. On the CPP side we need to switch from building up a descriptor table to using `ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView`. Compiling with the updated root signature, we get the following:
 
 ```
   s_version     UC_VERSION_GFX10 | UC_VERSION_W64_BIT   // 000000000000: B0802004
@@ -76,9 +76,42 @@ Switching to a `D3D12_ROOT_PARAMETER_TYPE_CBV` gets us:
   exp           mrt0, v0, v0, v2, v2 done compr vm      // 000000000044: F8001C0F 00000200
 ```
 
+Our load for the descriptor table is gone and has been replaced by a bunch of moves and bit twidling. We have to take a slight step back to understand what exactly the compiler decide to do here. 
+A buffer descriptor struct is essentially a struct where members take up a specific bit range. For example it could look something like this if coded in c++:
+
+TODO: check docs for something sensible.
+```cpp
+struct BufferDescriptor
+{
+  ...
+  uint num_elements : 4;
+  uint stride : 8;
+  uint memory_address : 20;
+  ...
+};
+```
+
+The descriptor essentially tells the gpu where to find all the relevant bits when reading a buffer. Please note that all types of HLSL buffers share the same descriptor on GCN/RDNA. The shader itself already contains a lot of the information the compiler needs to read the constant buffer. One thing it doesn't have though is the memory address where to actually read the constant buffer data from. 
+
+What the compiler is doing with `D3D12_ROOT_PARAMETER_TYPE_CBV` is building up the constant buffer descriptor inline:
+
+```
+  s_and_b32     s0, s3, lit(0x0000ffff)                 // 00000000000C: 8700FF03 0000FFFF
+  s_mov_b32     s3, lit(0x2104bfac)                     // 000000000014: BE8303FF 2104BFAC
+  s_or_b32      s0, s0, lit(0x00100000)                 // 00000000001C: 8800FF00 00100000
+  s_mov_b32     s1, s0                                  // 000000000024: BE810300
+  s_mov_b32     s0, s2                                  // 000000000028: BE800302
+  s_movk_i32    s2, 0x1000                              // 00000000002C: B0021000
+  tbuffer_load_format_xyzw  v[0:3], v0, s[0:3], 0 idxen format:[BUF_FMT_32_32_32_32_FLOAT] // 000000000030: EA6B2000 80000000
+```
+
+Again the load is done based on the descriptor stored in registers s[0:3]. The address of the constant buffer (which we supplied with SetGraphicsRootConstantBufferView) is loaded up into register s3 before the wave is launched. The compiler makes sure we only add the relevant bits to the constant buffer descriptor by masking out the bits we should not overwrite. As said before most of the information is known to the compiler at compile time, with the `s_and_b32` it fills in the missing memory address.
+
+By switching to `D3D12_ROOT_PARAMETER_TYPE_CBV` we are able to remove one indirection, the descriptor table lookup. Could we do even better? Enter: `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`.
+
 ### D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
 
-Switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`:
+And again, we change our root signature to use `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`. This time we need to use `ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstants` to set the constant buffer values. We make the change and hit compile:
 
 ```
   s_version     UC_VERSION_GFX10 | UC_VERSION_W64_BIT   // 000000000000: B0802004
@@ -88,9 +121,14 @@ Switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`:
   exp           mrt0, v0, v0, v1, v1 done compr vm      // 000000000018: F8001C0F 00000100
 ```
 
-Holy cow, did our shader just turn into 5 lines of assembly? What happened.
+Holy cow, did our shader just turn into 5 lines of assembly? This can't be it right? Nope, entirely expected behaviour :)
 
+What happened is that our constant buffer data is directly loaded into scalar registers s[2:5] before the wave is launched. All that the shader needs to do is read those registers to get the values. That's it. Doesn't get much faster than this.
+
+But please don't start switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` everywhere. While it can definietly help in some cases, it depends a lot on the use case. Ideally you want to store data in there that is frequently accessed but also doesn't have a giant memory footprint. Root constants take up a considerable amount of data in the root signature (see [Root Argument Limits](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#root-argument-limits)), on top of that the compiler also needs to reserve scalar registers in order to store the data. You could have cases where you are better of using those scalar registers somewhere else. Only way to find out is to profile before making such changes.
 
 ### The end
 
-I hope this post gave a bit of insight on how different type of root signature parameters change the way a shader is compiled. 
+I hope this post gave a better understanding on how root parameter types translate to different concepts in assembly. 
+
+If you made it to the end, thank you for reading :) Otherwise hi mom!
