@@ -1,7 +1,7 @@
 ## Dissecting shader assembly with different d3d12 root signatures
 
-In this post I'd like to show how changing the root signature can impact the generated shader assembly. The assembly that we will be looking at is the assembly from RDNA2, specifically taken on a AMD RX6600 XT. The ISA documentation can be found [here](https://developer.amd.com/wp-content/resources/RDNA_Shader_ISA.pdf). We are going to assume that the reader has a basic understanding of D3D12 root signatures.
-The assembly has been extracted by using RenderDoc.
+In this post I'd like to show how changing the root signature can impact the generated shader assembly. The assembly that we will be looking at is the assembly from RDNA2, specifically compiled and taken on an AMD RX6600 XT. The ISA documentation can be found [here](https://developer.amd.com/wp-content/resources/RDNA_Shader_ISA.pdf). I'm going to assume that the reader has a basic understanding of D3D12 root signatures and GCN/RDNA architecture.
+The assembly has been extracted by using the live driver disassembly feature from RenderDoc.
 
 The HLSL shader that we will be referencing is a basic pixel shader that outputs a single color from a constant buffer:
 
@@ -132,3 +132,7 @@ But please don't start switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` 
 I hope this post gave a better understanding on how root parameter types translate to different concepts in assembly. 
 
 If you made it to the end, thank you for reading :) Otherwise hi mom!
+
+### Notes
+
+You can use ID3D12PipelineState::GetPrivateData(WKPDID_CommentStringW) to extract the assembly from a pipeline on AMD.
