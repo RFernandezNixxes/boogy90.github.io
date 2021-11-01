@@ -78,7 +78,7 @@ Again, we use the same shader but this time we use D3D12_ROOT_PARAMETER_TYPE_CBV
   exp           mrt0, v0, v0, v2, v2 done compr vm      // 000000000044: F8001C0F 00000200
 ```
 
-Our load for the descriptor table is gone and has been replaced by a bunch of moves and bit twidling. We have to take a slight step back to understand what exactly the compiler decide to do here. 
+Our load for the descriptor table is gone and has been replaced by a bunch of moves and bit twiddling. We have to take a slight step back to understand what exactly the compiler decided to do here. 
 You could think of a buffer descriptor as a struct where members take up a specific bit range. For example the buffer descriptor could look something like this if coded in C++:
 
 ```cpp
@@ -127,15 +127,15 @@ Holy cow, did our shader just turn into 5 lines of assembly? This can't be it ri
 
 What happened is that our constant buffer data is directly loaded into scalar registers s[2:5] before the wave is launched. All that the shader needs to do is read those registers to get the values. That's it. Doesn't get much faster than this.
 
-But please don't start switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` everywhere. While it can definietly help in some cases, it depends a lot on the use case. Ideally you want to store data in there that is frequently accessed but also doesn't have a giant memory footprint. Root constants take up a considerable amount of data in the root signature (see [Root Argument Limits](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#root-argument-limits)), on top of that the compiler also needs to reserve scalar registers in order to store the data. You could have cases where you are better of using those scalar registers somewhere else. Only way to find out is to profile before making such changes.
+But please don't start switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` everywhere. While it can definietly help in some cases, it depends a lot on the use case. Ideally you want to store data in there that is frequently accessed but also doesn't have a giant memory footprint. Root constants take up a considerable amount of data in the root signature (see [Root Argument Limits](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#root-argument-limits)), on top of that the compiler also needs to reserve scalar registers in order to store the data. You could have cases where you are better off using those scalar registers somewhere else. Only way to find out is to profile before making such changes. (Question from Rebecca - does this differ between Nvidia & AMD? I assume yes, because Nvidia ask us to change this often)
 
 ### Pros and Cons
 
-While the descriptor table results in a memory load, generally it's the safest option to pick. They allow you to store way more descriptors then inline descriptors or root constants.
+While the descriptor table results in a memory load, generally it's the safest option to pick. They allow you to store way more descriptors than inline descriptors or root constants.
 
-Inline descriptors are limited to [buffer resources](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#using-descriptors-directly-in-the-root-arguments) and cannot be used for textures. There is also no bounds checking happening for inline descriptor. The shader is now really responsible for not fetching out of bounds. 
+Inline descriptors are limited to [buffer resources](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#using-descriptors-directly-in-the-root-arguments) and cannot be used for textures. There is also no bounds checking happening for inline descriptors. The shader is now really responsible for not fetching out of bounds. 
 
-Root constants have the least amount of indirection but also take up scalar registers. Depending on your shader they might actually be usefull for other parts of your code. Having scalars spill to vgpr's is no fun either. The same applies here that no bounds checking is done and an out of bounds read will produce undefined results.
+Root constants have the least amount of indirection but also take up scalar registers. Depending on your shader they might actually be useful for other parts of your code. Having scalars spill to vgpr's is no fun either. The same applies here that no bounds checking is done and an out of bounds read will produce undefined results.
 
 As always profile when making these types of changes, that's the only way to know for sure if things will be faster :)
 
