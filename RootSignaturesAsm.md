@@ -46,8 +46,8 @@ I'll highlight the important bits that are relevant for our constant buffer load
   s_mov_b32       s0, s2                                  // 00000000000C: BE800302
   s_load_dwordx4  s[0:3], s[0:1], null                    // 000000000010: F4080000 FA000000
 ```
-The `s_getpc_b64` is a clever way of setting s1 to zero, it stores the byte address of the next instruction into s0 and s1. Essentially setting s0 to 00000C and s1 to 000000.
-s0 is immediately overwritten with s2 by `s_mov_b32`. My assumption is that s2 contains the adress of the descriptor table that holds the constant buffer descriptor. Eventually `s_load_dwordx4` loads the constant buffer descriptor from the descriptor table defined in s[0:1] at index 0 into s0 through s3.
+
+The `s_getpc_b64` is partially used to get the memory address for the descriptor table. Both the shader and descriptor table live in the same address space. The compiler makes use of this and stores the top 32 bits in s1. My assumption is that s2 contains the lower 32 bits of the descriptor table that holds the constant buffer descriptor. Eventually `s_load_dwordx4` loads the constant buffer descriptor from the descriptor table defined in s[0:1] at index 0 into s0 through s3.
 
 ```
   tbuffer_load_format_xyzw  v[0:3], v0, s[0:3], 0 idxen format:[BUF_FMT_32_32_32_32_FLOAT] // 000000000020: EA6B2000 80000000
