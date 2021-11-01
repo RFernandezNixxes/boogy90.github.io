@@ -18,9 +18,11 @@ float4 PSMain() : SV_TARGET0
 }
 ```
 
+We will be going over different types of root signatures and how they change the generated assembly. Lets start with: `D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE`.
+
 ### D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
 
-We start out with a root signature that has one entry for our pixel shader. A `D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE` with range type set to `D3D12_DESCRIPTOR_RANGE_TYPE_CBV`. Compiling the pixel shader together with the root signature gives us the following assembly:
+We start out with a root signature that is composed of one descriptor table of type `D3D12_DESCRIPTOR_RANGE_TYPE_CBV`. Compiling the pixel shader together with the root signature gives us the following assembly:
 
 ```
   s_version     UC_VERSION_GFX10 | UC_VERSION_W64_BIT   // 000000000000: B0802004
@@ -52,12 +54,12 @@ s0 is immediately overwritten with s2 by `s_mov_b32`. My assumption is that s2 c
 ```
 
 With `tbuffer_load_format_xyzw` we load the `cColor` value into v0 through v3 using the constant buffer descriptor we loaded earlier.
-It's interesting to see that the compiler decides to use a `tbuffer_load_format_xyzw` instead of a `s_buffer_load_dwordx4` !check_this_plz! instruction even when the constant buffer value is uniform across the wave. My guess is that it's an optimization to load directly into vector registers to save a couple of scalar registers. The output needs to be written to a vector register anyway so it might as well do that here to save a couple of scalar registers.
-Bassically this is the assembly that you get when you use a D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE as a root signature entry. Now lets see what happens if we change it to `D3D12_ROOT_PARAMETER_TYPE_CBV`.
+It's interesting to see that the compiler decides to use a `tbuffer_load_format_xyzw` instead of a `s_buffer_load_dwordx4` !check_this_plz! instruction even when the constant buffer value is uniform across the wave. My guess is that it's an optimization related to the color export. Changing the return to `return cColor + float4(1, 1, 1, 1);` actually turns the load into `s_buffer_load_dwordx4`.
+This is the assembly that you get when you use a D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE as a root signature entry. Now lets see what happens if we change it to `D3D12_ROOT_PARAMETER_TYPE_CBV`.
 
 ### D3D12_ROOT_PARAMETER_TYPE_CBV
 
-Again, we use the same shader but this time we use D3D12_ROOT_PARAMETER_TYPE_CBV instead as root signature entry. On the CPP side we need to switch from building up a descriptor table to using `ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView`. Compiling with the updated root signature, we get the following:
+Again, we use the same shader but this time we use D3D12_ROOT_PARAMETER_TYPE_CBV instead. On the CPU side we need to switch from building up a descriptor table to using `ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView`. Compiling with the updated root signature, we get the following:
 
 ```
   s_version     UC_VERSION_GFX10 | UC_VERSION_W64_BIT   // 000000000000: B0802004
@@ -77,23 +79,23 @@ Again, we use the same shader but this time we use D3D12_ROOT_PARAMETER_TYPE_CBV
 ```
 
 Our load for the descriptor table is gone and has been replaced by a bunch of moves and bit twidling. We have to take a slight step back to understand what exactly the compiler decide to do here. 
-A buffer descriptor struct is essentially a struct where members take up a specific bit range. For example it could look something like this if coded in c++:
+You could think of a buffer descriptor as a struct where members take up a specific bit range. For example the buffer descriptor could look something like this if coded in C++:
 
-TODO: check docs for something sensible.
 ```cpp
 struct BufferDescriptor
 {
   ...
-  uint num_elements : 4;
-  uint stride : 8;
+  uint stride : 4;
+  uint num_elements : 16;
+  uint format : 6;
   uint memory_address : 20;
   ...
 };
 ```
 
-The descriptor essentially tells the gpu where to find all the relevant bits when reading a buffer. Please note that all types of HLSL buffers share the same descriptor on GCN/RDNA. The shader itself already contains a lot of the information the compiler needs to read the constant buffer. One thing it doesn't have though is the memory address where to actually read the constant buffer data from. 
+The descriptor essentially tells the gpu where to find all the relevant information when reading/writing a buffer. The shader itself already contains a lot of the information the compiler needs to read the constant buffer. But one thing it doesn't have (which is quite important) is the memory address where to actually read the constant buffer data from. We gave this address when calling SetGraphicsRootConstantBufferView.
 
-What the compiler is doing with `D3D12_ROOT_PARAMETER_TYPE_CBV` is building up the constant buffer descriptor inline:
+What the compiler is doing with `D3D12_ROOT_PARAMETER_TYPE_CBV` is building up the constant buffer descriptor inline with a bit of ALU work:
 
 ```
   s_and_b32     s0, s3, lit(0x0000ffff)                 // 00000000000C: 8700FF03 0000FFFF
@@ -105,9 +107,9 @@ What the compiler is doing with `D3D12_ROOT_PARAMETER_TYPE_CBV` is building up t
   tbuffer_load_format_xyzw  v[0:3], v0, s[0:3], 0 idxen format:[BUF_FMT_32_32_32_32_FLOAT] // 000000000030: EA6B2000 80000000
 ```
 
-Again the load is done based on the descriptor stored in registers s[0:3]. The address of the constant buffer (which we supplied with SetGraphicsRootConstantBufferView) is loaded up into register s3 before the wave is launched. The compiler makes sure we only add the relevant bits to the constant buffer descriptor by masking out the bits we should not overwrite. As said before most of the information is known to the compiler at compile time, with the `s_and_b32` it fills in the missing memory address.
+The address of the constant buffer is loaded up into register s3 before the wave is launched. The compiler makes sure it only adds the relevant bits to the constant buffer descriptor by masking out the bits we should not overwrite. For example it decides to only take the bottom 16 bits of whatever is stored in s3 with `s_and_b32 s0, s3, lit(0x0000ffff)`, this would translate to c++ code as `s0 = s3 & 0x0000ffff`.
 
-By switching to `D3D12_ROOT_PARAMETER_TYPE_CBV` we are able to remove one indirection, the descriptor table lookup. Could we do even better? Enter: `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`.
+By switching to `D3D12_ROOT_PARAMETER_TYPE_CBV` we are able to remove one indirection, the descriptor table lookup. We traded a buffer load for a bit of ALU work. In most cases this would be faster, because waiting on memory is generally slow. Could we do even better? Enter: `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS`.
 
 ### D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
 
@@ -127,12 +129,18 @@ What happened is that our constant buffer data is directly loaded into scalar re
 
 But please don't start switching to `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` everywhere. While it can definietly help in some cases, it depends a lot on the use case. Ideally you want to store data in there that is frequently accessed but also doesn't have a giant memory footprint. Root constants take up a considerable amount of data in the root signature (see [Root Argument Limits](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#root-argument-limits)), on top of that the compiler also needs to reserve scalar registers in order to store the data. You could have cases where you are better of using those scalar registers somewhere else. Only way to find out is to profile before making such changes.
 
+### Pros and Cons
+
+While the descriptor table results in a memory load, generally it's the safest option to pick. They allow you to store way more descriptors then inline descriptors or root constants.
+
+Inline descriptors are limited to [buffer resources](https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#using-descriptors-directly-in-the-root-arguments) and cannot be used for textures. There is also no bounds checking happening for inline descriptor. The shader is now really responsible for not fetching out of bounds. 
+
+Root constants have the least amount of indirection but also take up scalar registers. Depending on your shader they might actually be usefull for other parts of your code. Having scalars spill to vgpr's is no fun either. The same applies here that no bounds checking is done and an out of bounds read will produce undefined results.
+
+As always profile when making these types of changes, that's the only way to know for sure if things will be faster :)
+
 ### The end
 
 I hope this post gave a better understanding on how root parameter types translate to different concepts in assembly. 
 
 If you made it to the end, thank you for reading :) Otherwise hi mom!
-
-### Notes
-
-You can use ID3D12PipelineState::GetPrivateData(WKPDID_CommentStringW) to extract the assembly from a pipeline on AMD.
